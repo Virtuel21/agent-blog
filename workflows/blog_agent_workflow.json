@@ -1,0 +1,645 @@
+{
+  "name": "Blog Article Agent",
+  "nodes": [
+    {
+      "id": "1",
+      "name": "Config (Code)",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [0, 0],
+      "parameters": {
+        "language": "javascript",
+        "functionCode": "const config = {\n  sheetIdRoadmap: '',\n  sheetNameRoadmap: '',\n  sheetIdInternalLinks: '',\n  sheetNameInternalLinks: '',\n  driveFolderTargetId: '',\n  hubspotBlogId: '',\n  domain: 'https://www.mondialrelay.fr',\n  publishToHubspot: false,\n  serpProvider: 'customsearch'\n};\nreturn [{ config }];"
+      }
+    },
+    {
+      "id": "2",
+      "name": "Read Roadmap (Google Sheets → Read)",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4,
+      "position": [200, 0],
+      "parameters": {
+        "operation": "read",
+        "sheetId": "={{$node[\"Config (Code)\"].json[\"config\"][\"sheetIdRoadmap\"]}}",
+        "options": {
+          "sheetName": "={{$node[\"Config (Code)\"].json[\"config\"][\"sheetNameRoadmap\"]}}",
+          "useFirstRowAsHeaders": true,
+          "valueRenderMode": "UNFORMATTED_VALUE",
+          "includeRowNumber": true
+        },
+        "returnAll": true
+      },
+      "credentials": {
+        "googleApi": {
+          "name": "Google OAuth2 – Blog Agent"
+        }
+      }
+    },
+    {
+      "id": "3",
+      "name": "Pick Next Topic (Code)",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [400, 0],
+      "parameters": {
+        "language": "javascript",
+        "functionCode": "const rows = items.map(item => item.json);\nlet selected = null;\nlet index = -1;\nfor (let i = 0; i < rows.length; i++) {\n  const row = rows[i];\n  const statusRaw = row.status ?? row.Status ?? row[\"Status\"];\n  const status = statusRaw ? statusRaw.toString().trim().toLowerCase() : '';\n  if (status === 'à produire' || status === 'a produire') {\n    selected = row;\n    index = i;\n    break;\n  }\n}\nif (!selected) {\n  return [{ no_topic: true }];\n}\nconst topic = selected.topic ?? selected.Topic ?? selected[\"Topic\"] ?? '';\nconst possibleRowNumber = selected.rowNumber ?? selected.RowNumber ?? selected.row ?? selected.Row;\nconst sheetRow = possibleRowNumber ? Number(possibleRowNumber) : index + 2;\nreturn [{\n  no_topic: false,\n  topic_item: {\n    sheet_row: sheetRow,\n    topic\n  },\n  row_data: selected\n}];"
+      }
+    },
+    {
+      "id": "4",
+      "name": "IF No Topic (IF)",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [600, 0],
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{$json[\"no_topic\"]}}",
+              "operation": "isTrue"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "5",
+      "name": "Stop – No Topic (NoOp)",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [800, -200]
+    },
+    {
+      "id": "6",
+      "name": "SERP Fetch (HTTP Request)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [800, 120],
+      "parameters": {
+        "method": "GET",
+        "url": "={{$node[\"Config (Code)\"].json[\"config\"][\"serpProvider\"] === 'customsearch' ? 'https://www.googleapis.com/customsearch/v1' : ($node[\"Config (Code)\"].json[\"config\"][\"serpProvider\"] === 'serpapi' ? 'https://serpapi.com/search.json' : 'https://example.com/serp-placeholder')}}",
+        "options": {
+          "response": {
+            "responseFormat": "json"
+          },
+          "queryParametersUi": {
+            "parameter": [
+              {
+                "name": "q",
+                "value": "={{$node[\"Pick Next Topic (Code)\"].json[\"topic_item\"][\"topic\"]}}"
+              },
+              {
+                "name": "num",
+                "value": "10"
+              },
+              {
+                "name": "gl",
+                "value": "fr"
+              }
+            ]
+          }
+        }
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "name": "Search API – Blog Agent"
+        }
+      }
+    },
+    {
+      "id": "7",
+      "name": "SERP → Competition (OpenAI Chat)",
+      "type": "n8n-nodes-base.openAi",
+      "typeVersion": 3,
+      "position": [1000, 120],
+      "parameters": {
+        "operation": "chat",
+        "chatModel": "gpt-4o-mini",
+        "systemMessage": "Tu normalises des SERP en JSON `serp_competition`. Respecte strictement le schéma demandé, sans texte hors JSON. Langue FR, ton pro Mondial Relay.",
+        "messages": [
+          {
+            "text": "Topic: {{$node[\"Pick Next Topic (Code)\"].json[\"topic_item\"][\"topic\"]}}\\nSERP_brut: {{JSON.stringify($json)}}",
+            "type": "user"
+          }
+        ],
+        "responseFormat": "json_object",
+        "jsonOutput": true
+      },
+      "credentials": {
+        "openAiApi": {
+          "name": "OpenAI – Blog Agent"
+        }
+      }
+    },
+    {
+      "id": "8",
+      "name": "GSC Query (HTTP Request)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [1200, 120],
+      "parameters": {
+        "method": "POST",
+        "url": "={{'https://searchconsole.googleapis.com/webmasters/v3/sites/' + ('sc-domain:' + $node[\"Config (Code)\"].json[\"config\"][\"domain\"].replace(/^https?:\\/\\//, '')) + '/searchAnalytics/query'}}",
+        "authentication": "oAuth2",
+        "sendBody": true,
+        "jsonParameters": true,
+        "options": {
+          "response": {
+            "responseFormat": "json"
+          }
+        },
+        "body": {
+          "startDate": "={{$now.minus({days:28}).toFormat('yyyy-LL-dd')}}",
+          "endDate": "={{$now.toFormat('yyyy-LL-dd')}}",
+          "dimensions": [
+            "query",
+            "page"
+          ],
+          "dimensionFilterGroups": [
+            {
+              "filters": [
+                {
+                  "dimension": "query",
+                  "operator": "contains",
+                  "expression": "={{$node[\"Pick Next Topic (Code)\"].json[\"topic_item\"][\"topic\"]}}"
+                }
+              ]
+            }
+          ],
+          "rowLimit": 250
+        }
+      },
+      "credentials": {
+        "googleOAuth2Api": {
+          "name": "Google OAuth2 – Blog Agent"
+        }
+      }
+    },
+    {
+      "id": "9",
+      "name": "GSC → Insights (OpenAI Chat)",
+      "type": "n8n-nodes-base.openAi",
+      "typeVersion": 3,
+      "position": [1400, 120],
+      "parameters": {
+        "operation": "chat",
+        "chatModel": "gpt-4o-mini",
+        "systemMessage": "Tu résumes Search Console en JSON `gsc_insights`. Respecte strictement le schéma sans texte hors JSON. Langue FR, ton pro Mondial Relay.",
+        "messages": [
+          {
+            "text": "Topic: {{$node[\"Pick Next Topic (Code)\"].json[\"topic_item\"][\"topic\"]}}\\nGSC_brut: {{JSON.stringify($json)}}",
+            "type": "user"
+          }
+        ],
+        "responseFormat": "json_object",
+        "jsonOutput": true
+      },
+      "credentials": {
+        "openAiApi": {
+          "name": "OpenAI – Blog Agent"
+        }
+      }
+    },
+    {
+      "id": "10",
+      "name": "Keywords Fetch (HTTP Request)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [1600, 120],
+      "parameters": {
+        "method": "GET",
+        "url": "https://api.keyword-provider.example/v1/keywords",
+        "options": {
+          "response": {
+            "responseFormat": "json"
+          },
+          "queryParametersUi": {
+            "parameter": [
+              {
+                "name": "q",
+                "value": "={{$node[\"Pick Next Topic (Code)\"].json[\"topic_item\"][\"topic\"]}}"
+              },
+              {
+                "name": "market",
+                "value": "fr"
+              }
+            ]
+          }
+        }
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "name": "Search API – Blog Agent"
+        }
+      }
+    },
+    {
+      "id": "11",
+      "name": "Keywords → Set (OpenAI Chat)",
+      "type": "n8n-nodes-base.openAi",
+      "typeVersion": 3,
+      "position": [1800, 120],
+      "parameters": {
+        "operation": "chat",
+        "chatModel": "gpt-4o-mini",
+        "systemMessage": "Tu fabriques `keyword_set` JSON structuré strict. Langue FR, ton pro Mondial Relay.",
+        "messages": [
+          {
+            "text": "Topic: {{$node[\"Pick Next Topic (Code)\"].json[\"topic_item\"][\"topic\"]}}\\nKeywords_brut: {{JSON.stringify($json)}}",
+            "type": "user"
+          }
+        ],
+        "responseFormat": "json_object",
+        "jsonOutput": true
+      },
+      "credentials": {
+        "openAiApi": {
+          "name": "OpenAI – Blog Agent"
+        }
+      }
+    },
+    {
+      "id": "12",
+      "name": "Read Internal Links (Google Sheets → Read)",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4,
+      "position": [2000, 120],
+      "parameters": {
+        "operation": "read",
+        "sheetId": "={{$node[\"Config (Code)\"].json[\"config\"][\"sheetIdInternalLinks\"]}}",
+        "options": {
+          "sheetName": "={{$node[\"Config (Code)\"].json[\"config\"][\"sheetNameInternalLinks\"]}}",
+          "useFirstRowAsHeaders": true,
+          "valueRenderMode": "UNFORMATTED_VALUE",
+          "returnAll": true
+        }
+      },
+      "credentials": {
+        "googleApi": {
+          "name": "Google OAuth2 – Blog Agent"
+        }
+      }
+    },
+    {
+      "id": "13",
+      "name": "Build Brief (OpenAI Chat)",
+      "type": "n8n-nodes-base.openAi",
+      "typeVersion": 3,
+      "position": [2200, 120],
+      "parameters": {
+        "operation": "chat",
+        "chatModel": "gpt-4o-mini",
+        "systemMessage": "Tu produis `brief` concis et actionnable (JSON strict). Langue FR, ton pro Mondial Relay.",
+        "messages": [
+          {
+            "text": "Topic: {{$node[\"Pick Next Topic (Code)\"].json[\"topic_item\"][\"topic\"]}}\\nSERP: {{JSON.stringify($node[\"SERP → Competition (OpenAI Chat)\"].json.serp_competition)}}\\nGSC: {{JSON.stringify($node[\"GSC → Insights (OpenAI Chat)\"].json.gsc_insights)}}\\nKeywords: {{JSON.stringify($node[\"Keywords → Set (OpenAI Chat)\"].json.keyword_set)}}",
+            "type": "user"
+          }
+        ],
+        "responseFormat": "json_object",
+        "jsonOutput": true
+      },
+      "credentials": {
+        "openAiApi": {
+          "name": "OpenAI – Blog Agent"
+        }
+      }
+    },
+    {
+      "id": "14",
+      "name": "Write Article (OpenAI Chat)",
+      "type": "n8n-nodes-base.openAi",
+      "typeVersion": 3,
+      "position": [2400, 120],
+      "parameters": {
+        "operation": "chat",
+        "chatModel": "gpt-4o-mini",
+        "systemMessage": "Rédige article FR B2B ton Mondial Relay, SEO, Hn, listes, CTA léger, FAQ, JSON-LD, maillage. Retour `article_bundle` JSON strict. Title ≤ 60c, meta ≤ 155c, slug kebab-case, 2–6 liens internes issus du pool, FAQ 3-6 items, sources originales.",
+        "messages": [
+          {
+            "text": "Domaine: {{$node[\"Config (Code)\"].json[\"config\"][\"domain\"]}}\\nBrief: {{JSON.stringify($node[\"Build Brief (OpenAI Chat)\"].json.brief)}}\\nLiens internes: {{JSON.stringify($node[\"Read Internal Links (Google Sheets → Read)\"].json)}}",
+            "type": "user"
+          }
+        ],
+        "responseFormat": "json_object",
+        "jsonOutput": true
+      },
+      "credentials": {
+        "openAiApi": {
+          "name": "OpenAI – Blog Agent"
+        }
+      }
+    },
+    {
+      "id": "15",
+      "name": "Assemble Final (Code)",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2600, 120],
+      "parameters": {
+        "language": "javascript",
+        "functionCode": "const topic_item = $node[\"Pick Next Topic (Code)\"].json.topic_item;\nconst serp_competition = $node[\"SERP → Competition (OpenAI Chat)\"].json.serp_competition;\nconst gsc_insights = $node[\"GSC → Insights (OpenAI Chat)\"].json.gsc_insights;\nconst keyword_set = $node[\"Keywords → Set (OpenAI Chat)\"].json.keyword_set;\nconst brief = $node[\"Build Brief (OpenAI Chat)\"].json.brief;\nconst article_bundle = $node[\"Write Article (OpenAI Chat)\"].json.article_bundle;\nconst final_payload = { topic_item, serp_competition, gsc_insights, keyword_set, brief, article_bundle };\nreturn [{ final_payload, topic_item, serp_competition, gsc_insights, keyword_set, brief, article_bundle }];"
+      }
+    },
+    {
+      "id": "16",
+      "name": "Create Google Doc (Google Docs → Create)",
+      "type": "n8n-nodes-base.googleDocs",
+      "typeVersion": 1,
+      "position": [2800, 120],
+      "parameters": {
+        "operation": "create",
+        "title": "={{$node[\"Write Article (OpenAI Chat)\"].json[\"article_bundle\"][\"metadatas\"][\"title\"]}}",
+        "documentContent": "={{$node[\"Write Article (OpenAI Chat)\"].json[\"article_bundle\"][\"article_html\"] + '<h2>FAQ</h2>' + $node[\"Write Article (OpenAI Chat)\"].json[\"article_bundle\"][\"faq\"].map(f => '<h3>' + f.question + '</h3>' + f.reponse_html).join('') + '<script type=\\\"application/ld+json\\\">' + JSON.stringify($node[\"Write Article (OpenAI Chat)\"].json[\"article_bundle\"][\"jsonld\"]) + '</script>'}}"
+      },
+      "credentials": {
+        "googleDocsOAuth2Api": {
+          "name": "Google OAuth2 – Blog Agent"
+        }
+      }
+    },
+    {
+      "id": "17",
+      "name": "Move to Drive (Google Drive → Move)",
+      "type": "n8n-nodes-base.googleDrive",
+      "typeVersion": 2,
+      "position": [3000, 120],
+      "parameters": {
+        "operation": "fileMove",
+        "fileId": "={{$json[\"documentId\"] ?? $json[\"id\"]}}",
+        "folderId": "={{$node[\"Config (Code)\"].json[\"config\"][\"driveFolderTargetId\"]}}"
+      },
+      "credentials": {
+        "googleDriveOAuth2Api": {
+          "name": "Google OAuth2 – Blog Agent"
+        }
+      }
+    },
+    {
+      "id": "18",
+      "name": "Publish HubSpot (HTTP Request)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [3200, 120],
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.hubapi.com/cms/v3/blogs/posts",
+        "authentication": "predefinedCredentialType",
+        "genericAuthType": "hubspotApi",
+        "jsonParameters": true,
+        "sendBody": true,
+        "body": {
+          "blogId": "={{$node[\"Config (Code)\"].json[\"config\"][\"hubspotBlogId\"]}}",
+          "title": "={{$node[\"Write Article (OpenAI Chat)\"].json[\"article_bundle\"][\"metadatas\"][\"title\"]}}",
+          "slug": "={{$node[\"Write Article (OpenAI Chat)\"].json[\"article_bundle\"][\"metadatas\"][\"slug\"]}}",
+          "htmlTitle": "={{$node[\"Write Article (OpenAI Chat)\"].json[\"article_bundle\"][\"metadatas\"][\"title\"]}}",
+          "postBody": "={{$node[\"Write Article (OpenAI Chat)\"].json[\"article_bundle\"][\"article_html\"]}}",
+          "metaDescription": "={{$node[\"Write Article (OpenAI Chat)\"].json[\"article_bundle\"][\"metadatas\"][\"meta_description\"]}}",
+          "publishImmediately": "={{$node[\"Config (Code)\"].json[\"config\"][\"publishToHubspot\"]}}",
+          "featuredImage": null,
+          "language": "fr",
+          "seoTitle": "={{$node[\"Write Article (OpenAI Chat)\"].json[\"article_bundle\"][\"metadatas\"][\"title\"]}}",
+          "seoMetaDescription": "={{$node[\"Write Article (OpenAI Chat)\"].json[\"article_bundle\"][\"metadatas\"][\"meta_description\"]}}"
+        }
+      },
+      "credentials": {
+        "hubspotApi": {
+          "name": "HubSpot – Blog Agent"
+        }
+      }
+    },
+    {
+      "id": "19",
+      "name": "Update Roadmap Row (Google Sheets → Update)",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4,
+      "position": [3400, 120],
+      "parameters": {
+        "operation": "update",
+        "sheetId": "={{$node[\"Config (Code)\"].json[\"config\"][\"sheetIdRoadmap\"]}}",
+        "options": {
+          "sheetName": "={{$node[\"Config (Code)\"].json[\"config\"][\"sheetNameRoadmap\"]}}",
+          "useFirstRowAsHeaders": true,
+          "valueInputMode": "USER_ENTERED"
+        },
+        "key": "rowNumber",
+        "keyValue": "={{$node[\"Pick Next Topic (Code)\"].json[\"topic_item\"][\"sheet_row\"]}}",
+        "data": [
+          {
+            "status": "rédigé",
+            "docUrl": "={{$node[\"Move to Drive (Google Drive → Move)\"].json.webViewLink ?? $node[\"Create Google Doc (Google Docs → Create)\"].json.documentUrl}}",
+            "hubspotUrl": "={{$json[\"url\"] ?? $json[\"absoluteUrl\"]}}"
+          }
+        ]
+      },
+      "credentials": {
+        "googleApi": {
+          "name": "Google OAuth2 – Blog Agent"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Config (Code)": {
+      "main": [
+        [
+          {
+            "node": "Read Roadmap (Google Sheets → Read)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read Roadmap (Google Sheets → Read)": {
+      "main": [
+        [
+          {
+            "node": "Pick Next Topic (Code)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Pick Next Topic (Code)": {
+      "main": [
+        [
+          {
+            "node": "IF No Topic (IF)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IF No Topic (IF)": {
+      "main": [
+        [
+          {
+            "node": "Stop – No Topic (NoOp)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "SERP Fetch (HTTP Request)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "SERP Fetch (HTTP Request)": {
+      "main": [
+        [
+          {
+            "node": "SERP → Competition (OpenAI Chat)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "SERP → Competition (OpenAI Chat)": {
+      "main": [
+        [
+          {
+            "node": "GSC Query (HTTP Request)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "GSC Query (HTTP Request)": {
+      "main": [
+        [
+          {
+            "node": "GSC → Insights (OpenAI Chat)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "GSC → Insights (OpenAI Chat)": {
+      "main": [
+        [
+          {
+            "node": "Keywords Fetch (HTTP Request)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Keywords Fetch (HTTP Request)": {
+      "main": [
+        [
+          {
+            "node": "Keywords → Set (OpenAI Chat)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Keywords → Set (OpenAI Chat)": {
+      "main": [
+        [
+          {
+            "node": "Read Internal Links (Google Sheets → Read)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read Internal Links (Google Sheets → Read)": {
+      "main": [
+        [
+          {
+            "node": "Build Brief (OpenAI Chat)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Brief (OpenAI Chat)": {
+      "main": [
+        [
+          {
+            "node": "Write Article (OpenAI Chat)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Write Article (OpenAI Chat)": {
+      "main": [
+        [
+          {
+            "node": "Assemble Final (Code)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Assemble Final (Code)": {
+      "main": [
+        [
+          {
+            "node": "Create Google Doc (Google Docs → Create)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create Google Doc (Google Docs → Create)": {
+      "main": [
+        [
+          {
+            "node": "Move to Drive (Google Drive → Move)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Move to Drive (Google Drive → Move)": {
+      "main": [
+        [
+          {
+            "node": "Publish HubSpot (HTTP Request)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Publish HubSpot (HTTP Request)": {
+      "main": [
+        [
+          {
+            "node": "Update Roadmap Row (Google Sheets → Update)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "staticData": {},
+  "active": false
+}
